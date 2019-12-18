@@ -13,7 +13,7 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import vgg
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"#default should be 1
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"#default should be 1
 model_names = sorted(name for name in vgg.__dict__
     if name.islower() and not name.startswith("__")
                      and name.startswith("vgg")

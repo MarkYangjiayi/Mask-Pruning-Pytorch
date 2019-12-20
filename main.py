@@ -13,6 +13,8 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import vgg
 
+import utils
+
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"#default should be 1
 model_names = sorted(name for name in vgg.__dict__
     if name.islower() and not name.startswith("__")
@@ -149,9 +151,9 @@ def main():
             'best_prec1': best_prec1,
         }, is_best, filename=os.path.join(args.save_dir, 'checkpoint_{}.tar'.format(epoch)))
 
-        for name, param in model.named_parameters():
-            # if param.requires_grad:
-            print(name)
+        # for name, param in model.named_parameters():
+        #     # if param.requires_grad:
+        #     print(name)
 
 def train(train_loader, model, criterion, optimizer, epoch):
     """
@@ -196,6 +198,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
+
+        utils.gl_loss(model)
 
         if i % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}]\t'

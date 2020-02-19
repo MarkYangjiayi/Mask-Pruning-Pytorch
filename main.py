@@ -14,8 +14,9 @@ import torchvision.datasets as datasets
 import vgg
 
 import utils
+import plot_utils
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"#default should be 1
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"#default should be 1
 model_names = sorted(name for name in vgg.__dict__
     if name.islower() and not name.startswith("__")
                      and name.startswith("vgg")
@@ -55,7 +56,7 @@ parser.add_argument('--cpu', dest='cpu', action='store_true',
                     help='use cpu')
 parser.add_argument('--save-dir', dest='save_dir',
                     help='The directory used to save the trained models',
-                    default='save_temp', type=str)
+                    default='save_temp_gl0.002', type=str)
 
 
 best_prec1 = 0
@@ -83,6 +84,15 @@ def main():
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume)
+            # inspect the values of the mask distribution
+            for layer in checkpoint['state_dict']:
+                if "mask" in layer:
+                    print(checkpoint['state_dict'][layer])
+                    print(checkpoint['state_dict'][layer].mean())
+                    print(checkpoint['state_dict'][layer].var())
+                    plot_utils.plot_dist(checkpoint['state_dict'][layer],layer)
+                    # plot_utils.plot_heatmap(checkpoint['state_dict'][layer],layer)
+            exit()
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
@@ -125,13 +135,22 @@ def main():
         model.half()
         criterion.half()
 
-    optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
+    mask_init(train_loader, model)
+    params = add_weight_decay(model,args.weight_decay)
+
+    optimizer = utils.SGD(params, args.lr,
+                                momentum=args.momentum)
 
     if args.evaluate:
         validate(val_loader, model, criterion)
         return
+
+    #quantize weights before training:
+    for name, param in model.named_parameters():
+        print(name)
+        if name.find('conv')>-1:
+            param.data = qu(param.data)
+    print("Weights quantized...")
 
     for epoch in range(args.start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch)
@@ -154,6 +173,24 @@ def main():
         # for name, param in model.named_parameters():
         #     # if param.requires_grad:
         #     print(name)
+
+def mask_init(train_loader, model):
+    print("Initializing mask shape...")
+    for i, (input, target) in enumerate(train_loader):
+        if args.cpu == False:
+            input = input.cuda(async=True)
+            target = target.cuda(async=True)
+        output = model(input)
+        break
+    print("Mask shape initiated!")
+
+def add_weight_decay(net, l2_value=0.0005, skip_list=()):
+    decay, no_decay = [], []
+    for name, param in net.named_parameters():
+        if not param.requires_grad: continue # frozen weights
+        if len(param.shape) == 1 or name.endswith(".mask") or name in skip_list: no_decay.append(param)
+        else: decay.append(param)
+    return [{'params': no_decay, 'weight_decay': 0.}, {'params': decay, 'weight_decay': l2_value}]
 
 def train(train_loader, model, criterion, optimizer, epoch):
     """
@@ -181,7 +218,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         # compute output
         output = model(input)
-        loss = criterion(output, target)
+        loss = criterion(output, target) + utils.gl_loss(model, epoch, rate=0.001)#0.002
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -199,7 +236,6 @@ def train(train_loader, model, criterion, optimizer, epoch):
         batch_time.update(time.time() - end)
         end = time.time()
 
-        utils.gl_loss(model)
 
         if i % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}]\t'

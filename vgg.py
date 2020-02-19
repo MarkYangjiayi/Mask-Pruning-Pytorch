@@ -23,18 +23,20 @@ class VGG(nn.Module):
         self.classifier = nn.Sequential(
             nn.Dropout(),
             nn.Linear(512, 512),
-            nn.ReLU(True),
+            utils.ReLU(True),
             nn.Dropout(),
             nn.Linear(512, 512),
-            nn.ReLU(True),
+            utils.ReLU(True),
             nn.Linear(512, 10),
         )
          # Initialize weights
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(0, math.sqrt(2. / n))
-                m.bias.data.zero_()
+                # m.weight.data.normal_(0, math.sqrt(2. / n))
+                nn.init.normal_(m.weight, 0, math.sqrt(2./ n))
+                # m.bias.data.zero_()
+                nn.init.zeros_(m.bias)
 
 
     def forward(self, x):
@@ -54,9 +56,9 @@ def make_layers(cfg, batch_norm=False):
             mask = utils.Mask(bits=1).cuda()
             conv2d = utils.Conv2d(in_channels, v, kernel_size=3, padding=1)
             if batch_norm:
-                layers += [mask,conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+                layers += [mask,conv2d, nn.BatchNorm2d(v), utils.ReLU(inplace=True)]
             else:
-                layers += [mask,conv2d, nn.ReLU(inplace=True)]
+                layers += [mask,conv2d, utils.ReLU(inplace=True)]
             in_channels = v
     return nn.Sequential(*layers)
 

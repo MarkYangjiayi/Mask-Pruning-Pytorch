@@ -7,6 +7,12 @@ bitsA = 8
 bitsE = 8
 bitsG = 8
 bitsU = 16
+bitsBN_G=8
+bitsBN_B=8
+bitsBN_M=16
+bitsBN_V=16
+bitsBN_X=16
+
 
 # bitsW = 8
 # bitsA = 8
@@ -107,6 +113,52 @@ def qg(x):
         result = norm * dscale / 128
 
     return result
+
+def qbng(x):
+    bits = bitsBN_G
+    if bits >= 32:
+        result = x
+    else:
+        result = quant(x)
+    return result
+
+def qbnb(x):
+    bits = bitsBN_B
+    if bits >= 32:
+        result = x
+    else:
+        result = quant(x)
+    return result
+
+def qbnm(x):
+    bits = bitsBN_M
+    if bits >= 32:
+        result = x
+    else:
+        result = quant(x)
+    return result
+
+def qbnv(x):
+    bits = bitsBN_V
+    if bits >= 32:
+        result = x
+    else:
+        result = quant(x)
+    return result
+
+def qbnx(x):
+    bits = bitsBN_X
+    if bits >= 32:
+        result = x
+    else:
+        result = quant(x)
+    return result
+
+def qebn(x):
+    return x
+
+def qgbn(x):
+    return x
 
 def qu(x):
     bits = bitsU

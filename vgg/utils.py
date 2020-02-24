@@ -344,7 +344,7 @@ def gl_layer(mask_layer, conv_layer, stru_param=4):
     return singlelayer_loss
 
 def adjust_gl_rate(rate, epoch):
-    if epoch < 100 : rate *= 2
+    if epoch < 100 : rate *= 1
     if 100 <= epoch < 300 : rate *= 2
     return rate
 

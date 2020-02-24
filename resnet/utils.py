@@ -5,6 +5,7 @@ from torch.optim.optimizer import Optimizer, required#for SGD
 from torch.autograd import Function
 from torch.nn.parameter import Parameter
 
+import math
 import numpy as np
 from quantization import *
 
@@ -117,6 +118,46 @@ class ReLU(nn.Module):
         inplace_str = 'inplace=True' if self.inplace else ''
         return inplace_str
 
+class BatchNorm2d(nn.BatchNorm2d):
+    def __init__(self, num_features, eps=1e-5, momentum=0.1,
+                 affine=True, track_running_stats=True):
+        super(BatchNorm2d, self).__init__(
+            num_features, eps, momentum, affine, track_running_stats)
+
+    def forward(self, input):
+        self._check_input_dim(input)
+
+        exponential_average_factor = 0.0
+
+        if self.training and self.track_running_stats:
+            if self.num_batches_tracked is not None:
+                self.num_batches_tracked += 1
+                if self.momentum is None:  # use cumulative moving average
+                    exponential_average_factor = 1.0 / float(self.num_batches_tracked)
+                else:  # use exponential moving average
+                    exponential_average_factor = self.momentum
+
+        # calculate running estimates
+        if self.training:
+            mean = input.mean([0, 2, 3])
+            # use biased var in train
+            var = input.var([0, 2, 3], unbiased=False)
+            n = input.numel() / input.size(1)
+            with torch.no_grad():
+                self.running_mean = exponential_average_factor * mean\
+                    + (1 - exponential_average_factor) * self.running_mean
+                # update running_var with unbiased var
+                self.running_var = exponential_average_factor * var * n / (n - 1)\
+                    + (1 - exponential_average_factor) * self.running_var
+        else:
+            mean = self.running_mean
+            var = self.running_var
+
+        input = (input - mean[None, :, None, None]) / (torch.sqrt(var[None, :, None, None] + self.eps))
+        if self.affine:
+            input = input * self.weight[None, :, None, None] + self.bias[None, :, None, None]
+
+        return input
 
 class Mask(nn.Module):
     def __init__(self,bits=1):
@@ -131,6 +172,8 @@ class Mask(nn.Module):
         self.height = None
         self.width = None
 
+        self.gl_list = []
+
     def quant(self):
         if self.bits == None:
             return self.mask
@@ -141,11 +184,13 @@ class Mask(nn.Module):
 
     def forward(self,input):
         if type(self.mask) == type(None):
-            self.mask = Parameter(torch.Tensor(input.shape[1:]).cuda())
+        # if self.mask.size() == torch.Size([2]):
+            self.mask = Parameter(torch.Tensor(input.shape[1:]).cuda(None))
             nn.init.constant_(self.mask,val=1.0)
             self.weight_shape = input.shape[1:]
             self.channel = input.shape[1]
             self.height = input.shape[2]
+            print("height:" + str(self.height))
             self.width = input.shape[3]
         self.input = input.detach()#to keep track of the value in gl regularization
         result = input*self.mask
@@ -233,28 +278,42 @@ def array_split(feat_ID, stru_param):
 
     return all_group_list
 
-def gl_loss(model,strength = 0.002):#0.00001
+def gl_loss(model, epoch, rate = 0.002):#0.00001
     """
     Function for calculating total gl_loss.
     """
-    if strength == 0.: return 0
-    
+    if rate == 0.: return 0
+    rate = adjust_gl_rate(rate, epoch)
+
     gl_list = []
     conv_layer = None
     mask_layer = None
 
-    for sequence in model.children():
-        for sub_sequence in sequence.children():
-            if isinstance(sub_sequence, nn.Sequential):
-                for layer in sub_sequence.children():
-                    if isinstance(layer, Mask):
-                        mask_layer = layer
-                    if isinstance(layer, Conv2d):
-                        conv_layer = layer
-                        gl_list.append(gl_layer_test(mask_layer,conv_layer))
-    return torch.sum(torch.stack(gl_list)).mul_(strength)
+    # for name, layer in model.named_modules():
+    #     if "mask" in name:
+    #         mask_layer = layer
+    #     if "conv" in name:
+    #         conv_layer = layer
+    #         gl_layer_test(mask_layer,conv_layer,gl_list)
 
-def gl_layer_test(mask_layer, conv_layer, stru_param=4):
+    for name, parameter in model.named_parameters():
+        if "mask" in name:
+            print(parameter)
+
+    # for sequence in model.children():
+    #     for sub_sequence in sequence.children():
+    #         if isinstance(sub_sequence, nn.Sequential):
+    #             for layer in sub_sequence.children():
+    #                 if isinstance(layer, Mask):
+    #                     mask_layer = layer
+    #                 if isinstance(layer, Conv2d):
+    #                     conv_layer = layer
+    #                     # gl_list.append(gl_layer_test(mask_layer,conv_layer))
+    #                     gl_layer_test(mask_layer,conv_layer,gl_list)
+    # return torch.sum(torch.stack(gl_list)).mul_(rate)
+    return torch.sum(torch.stack(gl_list)).mul_(rate)
+
+def gl_layer_test(mask_layer, conv_layer, gl_list, stru_param=4):
     """
     Function for calculating single layer loss.
     '''
@@ -268,13 +327,30 @@ def gl_layer_test(mask_layer, conv_layer, stru_param=4):
         return 0.0
 
     else:
+        print(mask_layer.mask)
+        print(mask_layer.height)
+        print(mask_layer.width)
         # reshape mask to 2D(C,H*W)
         # build index using torch.arrange
-        # select pixels using torch.mask_select
+        # select pixels using torch.masked_select
         # reshape pixels to (-1,4) size (make sure that it is divisible by 4)
         # compute the norm
         #return mask_layer.mask.view(-1,stru_param).norm(2,dim=1).sum()
-        return (mask_layer.mask * mask_layer.input).view(-1,stru_param).norm(2,dim=1).sum().div_(128.0)
+        if mask_layer.gl_list == []:
+            for i in range(conv_layer.s1*conv_layer.s2):
+                save_ker = torch.zeros(1,conv_layer.s1*conv_layer.s2)
+                save_ker[0,i] = 1
+                save_ker = save_ker.repeat(math.ceil(mask_layer.height/conv_layer.s1), math.ceil(mask_layer.width/conv_layer.s2))[:mask_layer.height,:mask_layer.width].bool()
+                save_ker = save_ker.unsqueeze_(0).repeat(mask_layer.channel, 1, 1).cuda()
+                mask_layer.gl_list.append(save_ker)
+
+        for kernel in mask_layer.gl_list:
+            kernel = torch.masked_select(mask_layer.mask * mask_layer.input,kernel)
+            kernel = kernel[:(kernel.shape[0]//stru_param)*stru_param].view(-1,stru_param).norm(2,dim=1).sum().div(128.0)
+            gl_list.append(kernel)
+
+        # kernel = (mask_layer.mask * mask_layer.input).view(-1,stru_param).norm(2,dim=1).sum().div_(128.0)
+        # gl_list.append(kernel)
 
 def gl_layer(mask_layer, conv_layer, stru_param=4):
     """
@@ -338,3 +414,8 @@ def print_mask(model):
                 for layer in sub_sequence.children():
                     if isinstance(layer, Mask):
                         print(layer.mask)
+
+def adjust_gl_rate(rate, epoch):
+    if epoch < 100 : rate *= 1
+    if 100 <= epoch < 300 : rate *= 2
+    return rate

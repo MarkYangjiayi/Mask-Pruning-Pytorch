@@ -22,7 +22,7 @@ import resnet
 import utils
 from quantization import *
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1,3"#default should be 1
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,2"#default should be 1
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
@@ -78,12 +78,19 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--save-dir', dest='save_dir',
+                    help='The directory used to save the trained models',
+                    default='save_temp', type=str)
 
 best_acc1 = 0
 
 
 def main():
+    global args
     args = parser.parse_args()
+
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -170,13 +177,6 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             model = torch.nn.DataParallel(model).cuda()
 
-    # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-
-    optimizer = utils.SGD(model.parameters(), args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
-
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -235,6 +235,15 @@ def main_worker(gpu, ngpus_per_node, args):
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
+    # define loss function (criterion) and optimizer
+    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+
+    #init mask layers
+    mask_init(train_loader, model)
+    params = add_weight_decay(model,args.weight_decay)
+    optimizer = utils.SGD(params, args.lr,
+                                momentum=args.momentum)
+
     if args.evaluate:
         validate(val_loader, model, criterion, args)
         return
@@ -269,7 +278,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
                 'optimizer' : optimizer.state_dict(),
-            }, is_best)
+            }, is_best, filename=os.path.join(args.save_dir, 'checkpoint_{}.tar'.format(epoch)))
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -298,6 +307,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         # compute output
         output = model(images)
         loss = criterion(output, target)
+        gl_loss = utils.gl_loss(model,epoch,rate=0.001)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -432,6 +442,22 @@ def accuracy(output, target, topk=(1,)):
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
+def add_weight_decay(net, l2_value=0.0005, skip_list=()):
+    decay, no_decay = [], []
+    for name, param in net.named_parameters():
+        if not param.requires_grad: continue # frozen weights
+        if len(param.shape) == 1 or name.endswith(".mask") or name in skip_list: no_decay.append(param)
+        else: decay.append(param)
+    return [{'params': no_decay, 'weight_decay': 0.}, {'params': decay, 'weight_decay': l2_value}]
+
+def mask_init(train_loader, model):
+    print("Initializing mask shape...")
+    for i, (input, target) in enumerate(train_loader):
+        input = input.cuda(async=True)
+        target = target.cuda(async=True)
+        output = model(input)
+        break
+    print("Mask shape initiated!")
 
 if __name__ == '__main__':
     main()
